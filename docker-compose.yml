@@ -1,48 +1,57 @@
 services:
-  graph:
-    build:
-      context: .
+  neo4j:
+    image: neo4j:5.26.0
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "7474:7474"    # UI (falls nicht benötigt -> diesen Block später entfernen)
+      - "7687:7687"    # Bolt
+    environment:
+      NEO4J_AUTH: "${NEO4J_AUTH}"   # NICHT mehr aus 2 ENVs zusammensetzen!
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+      NEO4JLABS_PLUGINS: '["apoc"]'
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthcheck')",
-        ]
+      # robust: nutzt cypher-shell (im offiziellen Image vorhanden)
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u \"$NEO4J_USER\" -p \"$NEO4J_PASSWORD\" 'RETURN 1' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 20
+      start_period: 60s
+
+  graphiti-mcp:
+    image: zepai/knowledge-graph-mcp:latest
+    restart: unless-stopped
     depends_on:
       neo4j:
         condition: service_healthy
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NEO4J_URI=bolt://neo4j:${NEO4J_PORT:-7687}
-      - NEO4J_USER=${NEO4J_USER}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - PORT=8000
-  neo4j:
-    image: neo4j:5.26.2
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -qO- http://localhost:${NEO4J_PORT:-7474} || exit 1",
-        ]
-      interval: 1s
-      timeout: 10s
-      retries: 10
-      start_period: 3s
     ports:
-      - "7474:7474" # HTTP
-      - "${NEO4J_PORT:-7687}:${NEO4J_PORT:-7687}" # Bolt
-    volumes:
-      - neo4j_data:/data
+      - "8000:8000"   # n8n greift via VM-IP:8000 zu
     environment:
-      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+      # --- LLM ---
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      MODEL_NAME: "${MODEL_NAME:-gpt-4o-mini}"
+      # --- Neo4j ---
+      NEO4J_URI: "${NEO4J_URI:-bolt://neo4j:7687}"
+      NEO4J_USER: "${NEO4J_USER:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD}"
+    # explizites Startkommando, das mit dem offiziellen Image funktioniert
+    command: >
+      sh -lc 'python -m graphiti_mcp_server --transport sse --host 0.0.0.0 --port 8000'
+    healthcheck:
+      # TCP-Check in reinem Python (ohne zusätzliche Tools)
+      test: ["CMD-SHELL", "python - << 'PY'\nimport socket\ns=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8000)); s.close()\nPY"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 25s
 
 volumes:
   neo4j_data:
+  neo4j_logs:
